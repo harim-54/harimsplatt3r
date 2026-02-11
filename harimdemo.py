@@ -138,7 +138,7 @@ class GlobalAlignedGaussianEngine:
                 
                 # 3. 하림님의 GN 정밀 최적화 수행
                 # main.py에서 우리가 추가한 refine_pose_gn 메서드를 호출합니다.
-                refined_s, refined_R, refined_t = self.splatt3r_model.refine_pose_gn(pts1, pts2, (s, R, t))
+                refined_s, refined_R, refined_t = geometry.refine_pose_gn(pts1, pts2, (s, R, t))
 
                 # 4. 정밀하게 최적화된 로컬 중심점 계산 (view1의 좌표계 내에서 정렬)
                 # local_means_refined는 이제 pts1(view1)과 완벽하게 정렬된 상태입니다.
