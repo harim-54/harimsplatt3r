@@ -28,6 +28,10 @@ import utils.loss_mask as loss_mask
 import utils.sh_utils as sh_utils
 import workspace
 
+# harim
+from utils.geometry import constrain_to_ray, solve_sim3_alignment
+
+
 
 class MAST3RGaussians(L.LightningModule):
 
@@ -85,6 +89,7 @@ class MAST3RGaussians(L.LightningModule):
 
         self.save_hyperparameters()
 
+
     def forward(self, view1, view2):
 
         # Freeze the encoder and decoder
@@ -96,10 +101,57 @@ class MAST3RGaussians(L.LightningModule):
         pred1 = self.encoder._downstream_head(1, [tok.float() for tok in dec1], shape1)
         pred2 = self.encoder._downstream_head(2, [tok.float() for tok in dec2], shape2)
 
+# harim : intrinsic 보정 연결
+        if self.config.get('use_intrinsics', False):
+    # 1. view1, view2에 들어있는 K 행렬(intrinsics)을 가져옵니다.
+
+            K1 = view1['K'] 
+            K2 = view2['K']
+    
+    # 2. utils/geometry.py에 만든 함수 호출
+            pred1['pts3d'] = geometry.constrain_to_ray(pred1['pts3d'], K1)
+            pred2['pts3d'] = geometry.constrain_to_ray(pred2['pts3d'], K2)
+    
+    # 3. 가우시안의 중심점(means)도 보정된 pts3d로 동기화
+            pred1['means'] = pred1['pts3d']
+            pred2['means'] = pred2['pts3d']
+# harim 여기까지
+
+        if self.config.get('use_gn_refine', False):
+            B = pred1['pts3d'].shape[0]  # 배치 사이즈 확인
+            device = pred1['pts3d'].device
+            
+            s_opts, R_opts, t_opts = [], [], []
+
+            for b in range(B):
+                # 각 배치별로 데이터를 꺼내어 GN 수행 (N, 3) 형태로 변환
+                # .reshape(-1, 3)은 (H, W, 3)을 (H*W, 3)으로 펼쳐줍니다.
+                p_src = pred2['pts3d'][b].reshape(-1, 3)
+                p_tgt = pred1['pts3d'][b].reshape(-1, 3)
+                conf = pred1['conf'][b].reshape(-1)
+
+                init_guess = (torch.tensor(1.0, device=device),pred2['R'][b], pred2['t'][b])
+
+                s_opt, R_opt, t_opt = geometry.refine_pose_gn(
+                    pts_src = p_src,
+                    pts_tgt = p_tgt,
+                    confidence = conf,
+                    initial_guess = init_guess
+                )
+
+                s_opts.append(s_opt)
+                R_opts.append(R_opt)
+                t_opts.append(t_opt)
+
+            pred2['s'] = torch.stack(s_opts)
+            pred2['R'] = torch.stack(R_opts)
+            pred2['t'] = torch.stack(t_opts)
+
         pred1['covariances'] = geometry.build_covariance(pred1['scales'], pred1['rotations'])
         pred2['covariances'] = geometry.build_covariance(pred2['scales'], pred2['rotations'])
 
         learn_residual = True
+        
         if learn_residual:
             new_sh1 = torch.zeros_like(pred1['sh'])
             new_sh2 = torch.zeros_like(pred2['sh'])
@@ -121,6 +173,27 @@ class MAST3RGaussians(L.LightningModule):
 
         # Predict using the encoder/decoder and calculate the loss
         pred1, pred2 = self.forward(view1, view2)
+
+# harim
+# [수정 포인트: Global Alignment 연결]
+# 1. MASt3R-SLAM의 Backend로부터 현재 프레임의 전역 포즈(T_WC)를 가져옴
+        T_WCs = batch.get('T_WC')
+
+# 2. 로컬 가우시안 중심(means)을 전역 좌표로 변환
+# means_global = T_WC * means_local
+        if T_WCs is not None:
+            T_WC1 = T_WCs[0]
+            T_WC2 = T_WCs[1]
+
+            pred1['means'] = geometry.transform_points(pred1['means'], T_WC1)
+            pred2['means_in_other_view'] = geometry.transform_points(pred2['means_in_other_view'], T_WC2)
+
+# 3. 회전(Rotation) 성분도 전역으로 업데이트
+            pred1['rotations'] = geometry.transform_rotations(pred1['rotations'], T_WC1)
+            pred2['rotations'] = geometry.transform_rotations(pred2['rotations'], T_WC2)
+        else:
+            pass
+
         color, _ = self.decoder(batch, pred1, pred2, (h, w))
 
         # Calculate losses
@@ -167,6 +240,31 @@ class MAST3RGaussians(L.LightningModule):
         # Predict using the encoder/decoder and calculate the loss
         with self.benchmarker.time("encoder"):
             pred1, pred2 = self.forward(view1, view2)
+# harim : global alignment 추가
+        with self.benchmarker.time("global_alignment"):
+            # A. Symmetric 매칭점 추출 (기존 pred 데이터 활용)
+            pts1 = pred1['pts3d'].reshape(-1, 3)
+            pts2 = pred2['means_in_other_view'].reshape(-1, 3)
+
+            conf = pred1['conf'].reshape(-1) 
+
+            # B. 초기 Sim3 최적화 (SVD 기반)
+            s, R, t = geometry.solve_sim3_alignment(pts1, pts2)
+            
+            # C. Gauss-Newton 정밀 최적화
+            # 노션의 solve_GN 로직을 호출하여 s, R, t를 더 정밀하게 다듬습니다.
+            refined_s, refined_R, refined_t = geometry.refine_pose_gn(
+                pts_src = pts2,
+                pts_tgt = pts1,
+                initial_guess = (s, R, t),
+                confidence = conf
+                )
+
+            # D. 가우시안 중심(means)을 전역 좌표계로 변환
+            # 이제 pred1, pred2의 위치는 단순한 view1 기준이 아니라 정렬된 상태가 됩니다.
+            pred2['means_in_other_view'] = refined_s * (pred2['means_in_other_view'] @ refined_R.t()) + refined_t
+# harim 코드 수정 끝
+
         with self.benchmarker.time("decoder", num_calls=num_targets):
             color, _ = self.decoder(batch, pred1, pred2, (h, w))
 
