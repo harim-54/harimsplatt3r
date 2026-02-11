@@ -116,66 +116,66 @@ class GlobalAlignedGaussianEngine:
 
         print(f"\nGlobal camera poses shape: {cam2world.shape}")
 
-        # Process consecutive pairs
-        for i in range(len(imgs) - 1):
-            view1 = self._prepare_view(imgs[i])
-            view2 = self._prepare_view(imgs[i + 1])
-
-            print(f"\nProcessing pair ({i}, {i+1})...")
+        # [수정] 키프레임 기반 가우시안 생성 루프
+        last_kf_idx = 0  # 첫 번째 프레임은 무조건 키프레임 기준점
+        
+        for i in range(1, len(imgs)):
+            print(f"\nEvaluating Frame {i} against Last Keyframe {last_kf_idx}...")
+            
+            view_kf = self._prepare_view(imgs[last_kf_idx])
+            view_curr = self._prepare_view(imgs[i])
 
             with torch.no_grad():
-                pred1, pred2 = self.splatt3r_model(view1, view2)
+                # 1. 두 이미지 사이의 대응점 및 파라미터 예측
+                pred1, pred2 = self.splatt3r_model(view_kf, view_curr)
+                
+                # 2. 키프레임 판정 지표 계산 (MASt3R-SLAM 방식)
+                # 신뢰도가 낮은 점들을 제외한 매칭 비중 확인
+                valid_mask = (pred1['conf'] > 1.0) & (pred2['conf'] > 1.0)
+                match_frac = valid_mask.float().mean().item()
+                
+                # match_frac이 0.5보다 작으면(변화가 크면) 새로운 키프레임으로 채택
+                match_thresh = 0.5 
+                is_new_kf = match_frac < match_thresh
 
-                # [하림 : Gauss-Newton 정밀 최적화 적용 시작]
-                # 1. 대응점 추출 (view1 기준)
+            if is_new_kf or (i == len(imgs) - 1):
+                print(f"  >> [NEW KEYFRAME] Adopting Frame {i} (Match Frac: {match_frac:.2f})")
+                
+                # 3. GN 정밀 최적화 (하림님 기존 로직)
                 pts1 = pred1['pts3d'].reshape(-1, 3)
-                # pred2가 view1에서 바라본 위치(means_in_other_view)를 가져옴
                 pts2 = pred2['means_in_other_view'].reshape(-1, 3)
-
-                # 2. 초기 Sim3 최적화 (SVD 기반)
-                # geometry.solve_sim3_alignment 함수가 구현되어 있어야 합니다.
                 s, R, t = geometry.solve_sim3_alignment(pts1, pts2)
                 
-                # 3. 하림님의 GN 정밀 최적화 수행
-                # main.py에서 우리가 추가한 refine_pose_gn 메서드를 호출합니다.
                 refined_s, refined_R, refined_t = geometry.refine_pose_gn(
-                    pts_src=pts2,
-                    pts_tgt=pts1,
-                    initial_guess=(s,R,t)
+                    pts_src=pts2, pts_tgt=pts1, initial_guess=(s, R, t)
                 )
 
-                # 4. 정밀하게 최적화된 로컬 중심점 계산 (view1의 좌표계 내에서 정렬)
-                # local_means_refined는 이제 pts1(view1)과 완벽하게 정렬된 상태입니다.
                 local_means_refined = refined_s * (pred2['means_in_other_view'] @ refined_R.t()) + refined_t
+                
+                # 4. 전역 좌표계 변환
+                c2w_view_kf = cam2world[last_kf_idx]
+                world_means = (local_means_refined.reshape(-1, 3) @ c2w_view_kf[:3, :3].t()) + c2w_view_kf[:3, 3]
 
-            # 5. 이제 전역(World) 좌표계로 변환
-            # MAST3R의 Global Pose (c2w_view1)를 사용하여 월드로 보냅니다.
-            c2w_view1 = cam2world[i]  # [4, 4]
-            
-            # 정렬된 로컬 좌표를 월드 좌표로 변환: P_world = R_c2w * P_local + t_c2w
-            world_means = (local_means_refined.reshape(-1, 3) @ c2w_view1[:3, :3].t()) + c2w_view1[:3, 3]
-            # [하림 로직 적용 끝]
+                # 5. 가우시안 파라미터 추출 및 저장 (기존과 동일)
+                sh = pred2['sh'].reshape(-1, 3)
+                scales = pred2['scales'].reshape(-1, 3)
+                rotations = pred2['rotations'].reshape(-1, 4)
+                opacities = pred2['opacities'].reshape(-1, 1)
+                world_rotations = self._transform_rotations_to_world(rotations, c2w_view_kf[:3, :3])
 
-            # Extract Gaussian parameters (keep raw values for viewer compatibility)
-            sh = pred2['sh'].reshape(-1, 3)
-            scales = pred2['scales'].reshape(-1, 3)  # Keep log scale
-            rotations = pred2['rotations'].reshape(-1, 4)
-            opacities = pred2['opacities'].reshape(-1, 1)  # Keep logit
-
-            # Transform rotations to world frame
-            # The rotation quaternion needs to be composed with the camera rotation
-            world_rotations = self._transform_rotations_to_world(rotations, c2w_view1[:3, :3])
-
-            # Store Gaussian data
-            self.all_gaussians.append({
-                'xyz': world_means.cpu().numpy().astype(np.float32),
-                'sh': sh.cpu().numpy().astype(np.float32),
-                'opacity': opacities.cpu().numpy().astype(np.float32),
-                'scale': scales.cpu().numpy().astype(np.float32),
-                'rot': world_rotations.cpu().numpy().astype(np.float32),
-            })
-
-            print(f"  -> Added {world_means.shape[0]} Gaussians")
+                self.all_gaussians.append({
+                    'xyz': world_means.cpu().numpy().astype(np.float32),
+                    'sh': sh.cpu().numpy().astype(np.float32),
+                    'opacity': opacities.cpu().numpy().astype(np.float32),
+                    'scale': scales.cpu().numpy().astype(np.float32),
+                    'rot': world_rotations.cpu().numpy().astype(np.float32),
+                })
+                print(f"     -> Added {world_means.shape[0]} Gaussians")
+                
+                # 마지막 키프레임 인덱스 갱신
+                last_kf_idx = i
+            else:
+                print(f"  >> [SKIP] Frame {i} is too similar to KF {last_kf_idx} (Match Frac: {match_frac:.2f})")
 
         # Also process the first frame (which is skipped in pairwise processing)
         # Use the first pair but take pred1's Gaussians
