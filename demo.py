@@ -21,6 +21,7 @@ from dust3r.utils.image import load_images
 from mast3r.utils.misc import hash_md5
 import main
 import utils.export as export
+import utils.geometry as geometry
 
 
 def get_reconstructed_scene(outdir, model, device, silent, image_size, ios_mode, filelist):
@@ -38,8 +39,20 @@ def get_reconstructed_scene(outdir, model, device, silent, image_size, ios_mode,
         img['true_shape'] = torch.from_numpy(img['true_shape'])
 
     output = model(imgs[0], imgs[1])
-
     pred1, pred2 = output
+
+    with torch.no_grad():
+        pts1 = pred1['pts3d'].reshape(-1, 3)
+        pts2 = pred2['means_in_other_view'].reshape(-1, 3)
+
+        S, R, t = geometry.solve_sim3_alignment(pts1, pts2)
+
+        refined_s, refined_R, refined_t = model.refine_pose_gn(pts1, pts2, (s, R, t))
+
+        pred2['means_in_other_view'] = refined_s * (pred2['means_in_other_view'] @ refined_R.t()) + refined_t
+        # 회전값도 전역에 맞춰 업데이트 하고 싶다면?
+        # pred2['rotations'] = geometry.transform_rotations(pred2['rotations'], refined_R)
+    
     plyfile = os.path.join(outdir, 'gaussians.ply')
     export.save_as_ply(pred1, pred2, plyfile)
     return plyfile
