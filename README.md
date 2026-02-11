@@ -66,7 +66,7 @@ Our example images and `.ply` files are available for download [here](https://hu
 
 ## Training
 
-Our training run can be recreated by running `python main.py configs/main.yaml`. Other configurations, such as those for the ablations, can be found in the `configs` folder.
+Our training run can be recreated by running `python harimmain.py configs/main.yaml`. Other configurations, such as those for the ablations, can be found in the `configs` folder.
 
 ## BibTeX
 
