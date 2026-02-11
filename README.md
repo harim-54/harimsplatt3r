@@ -27,7 +27,7 @@ Official implementation of `Splatt3R: Zero-shot Gaussian Splatting from Uncalibr
 1. Clone Splatt3R  
 ```bash
 git clone https://github.com/harim-54/harimsplatt3r.git
-cd splatt3r
+cd harimsplatt3r
 ```
 
 2. Setup Anaconda Environment
