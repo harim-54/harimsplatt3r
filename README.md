@@ -58,7 +58,7 @@ Our generated test coverage files, and our training and testing splits, can be d
 
 ## Demo
 
-The Gradio demo can be run using `python demo.py`, which loads our trained checkpoint from Hugging Face.
+The Gradio demo can be run using `python harimdemo.py`, which loads our trained checkpoint from Hugging Face.
 
 This demo generates a `.ply` file that represents the scene, which can be downloaded and rendered using online 3D Gaussian Splatting viewers such as [here](https://projects.markkellogg.org/threejs/demo_gaussian_splats_3d.php?art=1&cu=0,-1,0&cp=0,1,0&cla=1,0,0&aa=false&2d=false&sh=0) or [here](https://playcanvas.com/supersplat/editor).
 
