@@ -26,7 +26,7 @@ Official implementation of `Splatt3R: Zero-shot Gaussian Splatting from Uncalibr
 
 1. Clone Splatt3R  
 ```bash
-git clone https://github.com/btsmart/zero-shot-3DGS.git
+git clone https://github.com/btsmart/harimsplatt3r.git
 cd splatt3r
 ```
 
