@@ -41,7 +41,7 @@ from dust3r.utils.device import to_numpy
 # Splatt3r imports
 import harimmain as splatt3r_main
 from huggingface_hub import hf_hub_download
-from utils.geometry import camera_space_to_world_space
+from utils import geometry
 
 
 class GlobalAlignedGaussianEngine:
